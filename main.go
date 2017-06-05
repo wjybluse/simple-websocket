@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/elians/websockets/server"
+	"github.com/elians/websocket/server"
 )
 
 func main() {
