@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 
 	"github.com/elians/websocket/utils"
 )
@@ -12,6 +13,12 @@ import (
 const (
 	guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 	p    = "chat"
+)
+
+const (
+	requestHeader  = "GET %s HTTP/1.1"
+	responseHeader = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept:%s\r\n"
+	badRequest     = "HTTP/1.1 400 Bad Request\r\n"
 )
 
 type websocket struct {
@@ -23,121 +30,84 @@ type header struct {
 	name, value string
 }
 
-//Headers ... new type define
-type Headers []*header
-
-func replyHeader() Headers {
-	var headers = make([]*header, 0)
-	headers = append(headers,
-		&header{
-			name:  "Upgrade",
-			value: "websocket",
-		},
-		&header{
-			name:  "Connection",
-			value: "Upgrade",
-		},
-		&header{
-			name:  "status",
-			value: "HTTP/1.1 101 Switching Protocols",
-		})
-	return headers
+//Header ... new type define
+type Header struct {
+	headers map[string][]string
+	lock    *sync.RWMutex
 }
 
-func badReply() Headers {
-	var headers = make([]*header, 0)
-	headers = append(headers,
-		&header{
-			name:  "status",
-			value: "HTTP/1.1 400 Bad Request",
-		},
-		&header{
-			name:  "Cache-Control",
-			value: "no-cache",
-		})
-	return headers
+//NewHeader creat header
+func NewHeader() *Header {
+	return &Header{
+		headers: make(map[string][]string, 0),
+		lock:    new(sync.RWMutex),
+	}
 }
 
-//Get ... get value
-func (hs Headers) Get(key string) []string {
-	var values = make([]string, 0)
-	for _, v := range hs {
-		if v.name == key {
-			values = append(values, v.value)
-		}
-	}
-	return values
+//Get value
+func (hs Header) Get(key string) []string {
+	defer hs.lock.Unlock()
+	hs.lock.Lock()
+	return hs.headers[key]
 }
 
-//Put ... add one item
-func (hs Headers) Put(key, value string) Headers {
-	var header = &header{
-		name:  key,
-		value: value,
+//Put value
+func (hs Header) Put(key, value string) {
+	v := hs.headers[key]
+	defer hs.lock.Unlock()
+	hs.lock.Lock()
+	if v != nil {
+		hs.headers[key] = append(v, value)
+	} else {
+		hs.headers[key] = []string{value}
 	}
-	hs = append(hs, header)
-	return hs
 }
 
-//Headers ... get all headers
-func (hs Headers) Headers() map[string][]string {
-	var result = make(map[string][]string, 0)
-	for _, v := range hs {
-		if result[v.name] == nil {
-			result[v.name] = make([]string, 0)
+//PutAll put all header
+func (hs Header) PutAll(pairs map[string]string) {
+	defer hs.lock.Unlock()
+	hs.lock.Lock()
+	for key, value := range pairs {
+		v := hs.headers[key]
+		if v == nil {
+			hs.headers[key] = []string{}
 		}
-		result[v.name] = append(result[v.name], v.value)
+		hs.headers[key] = append(hs.headers[key], value)
 	}
-	return result
 }
 
-//AddHeader ... add header
-func (hs Headers) AddHeader(headers map[string]string) Headers {
-	for key, value := range headers {
-		hs = append(hs, &header{
-			name:  key,
-			value: value,
-		})
+//RequestURL ...
+func (hs Header) RequestURL() string {
+	if hs.headers["Request-URI"] == nil {
+		return ""
 	}
-	return hs
+	return hs.headers["Request-URI"][0]
 }
 
-func (hs Headers) String() string {
-	r := ""
-	method := ""
-	path := ""
-	p := ""
-	status := ""
-	for _, v := range hs {
-		if v.name == "method" {
-			method = v.value
-			continue
-		}
-		if v.name == "status" {
-			status = v.value
-			continue
-		}
-		if v.name == "path" {
-			path = v.value
-			continue
-		}
-		if v.name == "protocol" {
-			p = v.value
-			continue
-		}
-		r += fmt.Sprintf("%s: %s \r\n", v.name, v.value)
+//Method get method
+func (hs Header) Method() string {
+	if hs.headers["method"] == nil {
+		return ""
 	}
-	s := fmt.Sprintf("%s %s %s", method, path, p)
-	if method == "" || path == "" || p == "" {
-		s = status
+	return hs.headers["method"][0]
+}
+
+//Extensions websocket extension
+func (hs Header) Extensions() []string {
+	return hs.headers["Sec-WebSocket-Extensions"]
+}
+
+//HTTPVersion hhtp version
+func (hs Header) HTTPVersion() string {
+	if hs.headers["HTTP-Version"] == nil {
+		return ""
 	}
-	idx := strings.LastIndex(r, "\r\n")
-	return fmt.Sprintf("%s\r\n%s\r\n\r\n", s, r[:idx])
+	return hs.headers["HTTP-Version"][0]
 }
 
 type protocol interface {
-	handshake(headers Headers) error
-	upgrade(conn net.Conn, headers Headers) error
+	handshake(headers Header) error
+	upgrade(conn net.Conn, headers Header) error
 }
 
 //Listener ...listener interface
@@ -174,63 +144,53 @@ func (w *websocket) handleConn(conn net.Conn) error {
 	if err != nil {
 		return err
 	}
-	if n > 7*1024 {
-		//TODO
-		//read again
-	} else {
+	if n < 7*1024 {
 		buf = buf[:n]
 	}
-	headers := w.parserHeaders(buf)
-	err = w.handshake(headers)
+	header := w.parserHeaders(buf)
+	err = w.handshake(header)
 	if err != nil {
-		reply := badReply()
-		if strings.Contains(err.Error(), "version") {
-			reply.Put("Sec-WebSocket-Version", "13, 8, 7")
-		}
 		defer conn.Close()
-		conn.Write([]byte(reply.String()))
+		if strings.Contains(err.Error(), "version") {
+			conn.Write([]byte(badRequest + "Sec-WebSocket-Version:13,8,7\r\n\r\n"))
+		} else {
+			conn.Write([]byte(badRequest + "\r\n"))
+		}
+
 		fmt.Printf("handle error is %s \n", err)
 		return err
 	}
-	hs := replyHeader()
-	cid := Headers(headers).Get("Sec-WebSocket-Key")[0]
-	hs = hs.Put("Sec-WebSocket-Accept", utils.Base64Encoding(utils.Sha1(cid+guid)))
-	extensions := Headers(headers).Get("Sec-WebSocket-Extensions")
+	cid := header.Get("Sec-WebSocket-Key")[0]
+	accept := utils.Base64Encoding(utils.Sha1(cid + guid))
+	extensions := header.Get("Sec-WebSocket-Extensions")
+	rsp := fmt.Sprintf(responseHeader+"\r\n", accept)
 	if len(extensions) > 0 {
 		ext := extensions[0]
 		if strings.Contains(ext, "client_max_window_bits") {
 			ext = strings.Replace(ext, "client_max_window_bits", "client_max_window_bits=15", -1)
 		}
-		hs = hs.Put("Sec-WebSocket-Extensions", ext)
+		rsp = fmt.Sprintf(responseHeader+"%s\r\n\r\n", accept, "Sec-WebSocket-Extensions:"+ext)
 	}
-	conn.Write([]byte(hs.String()))
-	sub := newSubProtocol(conn, &defaultHandler{})
+	conn.Write([]byte(rsp))
+	sub := NewHandler(conn, &defaultHandler{}, extensions)
 	sub.handleMessage()
 	return nil
 }
 
-func (w *websocket) parserHeaders(buf []byte) []*header {
-	hstr := string(buf)
-	var headers = make([]*header, 0)
-	lines := strings.Split(hstr, "\r\n")
-	//method and host
-	mh := strings.Split(lines[0], " ")
-	if len(mh) < 3 {
-		log.Printf("invalid header %s \n", lines[0])
+func (w *websocket) parserHeaders(buf []byte) *Header {
+	content := string(buf)
+	lines := strings.Split(content, "\r\n")
+	if len(lines) < 3 {
 		return nil
 	}
-	headers = append(headers, &header{
-		name:  "method",
-		value: strings.TrimSpace(mh[0]),
-	})
-	headers = append(headers, &header{
-		name:  "path",
-		value: strings.TrimSpace(mh[1]),
-	})
-	headers = append(headers, &header{
-		name:  "version",
-		value: strings.TrimSpace(mh[2]),
-	})
+	arr := strings.Split(lines[0], " ")
+	if len(arr) < 3 {
+		return nil
+	}
+	header := NewHeader()
+	header.Put("method", arr[0])
+	header.Put("Request-URI", arr[1])
+	header.Put("HTTP-Version", arr[2])
 	for _, line := range lines[1:] {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -239,49 +199,39 @@ func (w *websocket) parserHeaders(buf []byte) []*header {
 		if len(pair) < 2 {
 			continue
 		}
-		headers = append(headers, &header{
-			name:  strings.TrimSpace(pair[0]),
-			value: strings.TrimSpace(pair[1]),
-		})
+		header.Put(strings.TrimSpace(pair[0]), strings.TrimSpace(pair[1]))
 	}
-	return headers
+	return header
 }
 
-func (w *websocket) handshake(headers Headers) error {
-	if headers.Get("method")[0] != "GET" {
+func (w *websocket) handshake(header *Header) error {
+	if header.Method() != "GET" {
 		//TODO method invalid
 		return fmt.Errorf("error method")
 	}
-	if w.url != headers.Get("path")[0] {
-		//TODO
+	if w.url != header.RequestURL() {
 		return fmt.Errorf("invalid path")
 	}
-	upgrade := headers.Get("Upgrade")
+	upgrade := header.Get("Upgrade")
 	if upgrade == nil || len(upgrade) <= 0 {
 		return fmt.Errorf("upgrade error")
 	}
-	connections := headers.Get("Connection")
+	connections := header.Get("Connection")
 	if len(connections) <= 0 || connections[0] != "Upgrade" {
 		return fmt.Errorf("upgrade error")
 	}
 	if upgrade[0] != "websocket" {
 		return fmt.Errorf("upgrade error")
 	}
-	log.Printf("header is %s \n", headers.String())
-	key := headers.Get("Sec-WebSocket-Key")
+	key := header.Get("Sec-WebSocket-Key")
 	//may include
 	//pt := headers.Get("Sec-WebSocket-Protocol")
-	version := headers.Get("Sec-WebSocket-Version")
+	version := header.Get("Sec-WebSocket-Version")
 	if key == nil || len(key) == 0 || key[0] == "" {
 		return fmt.Errorf("key is invalid")
 	}
 	if version == nil || len(version) <= 0 || version[0] == "" || version[0] != "13" {
 		return fmt.Errorf("version is invalid")
 	}
-	return nil
-}
-
-func (w *websocket) upgrade(conn net.Conn, headers Headers) error {
-	//TODO
 	return nil
 }
