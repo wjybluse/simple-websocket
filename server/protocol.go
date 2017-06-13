@@ -199,7 +199,7 @@ func (w *websocket) handleConn(conn net.Conn) error {
 	if len(extensions) > 0 {
 		ext := extensions[0]
 		if strings.Contains(ext, "client_max_window_bits") {
-			ext = strings.Replace(ext, "client_max_window_bits", "client_max_window_bits=10", -1)
+			ext = strings.Replace(ext, "client_max_window_bits", "client_max_window_bits=15", -1)
 		}
 		hs = hs.Put("Sec-WebSocket-Extensions", ext)
 	}

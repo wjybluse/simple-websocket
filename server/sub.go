@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"compress/flate"
 )
 
 const (
@@ -188,7 +189,8 @@ func (sb *subprotocol) handleMessage() error {
 			log.Printf("read data error")
 			continue
 		}
-		payload = sb.transformed(payload, maskKey)
+		sb.unmask(payload, maskKey)
+		flate.
 		switch opcode {
 		case OP_P:
 			sb.pong(nil)
@@ -211,15 +213,15 @@ func (sb *subprotocol) handleMessage() error {
 	}
 }
 
-func (sb *subprotocol) transformed(payload, maskKey []byte) []byte {
+func (sb *subprotocol) unmask(payload, maskKey []byte) {
 	if maskKey == nil {
-		return payload
+		return
 	}
-	var result = make([]byte, len(payload))
+	//return payload
 	for i := 0; i < len(payload); i++ {
-		result[i] = payload[i] ^ maskKey[i%4]
+		payload[i] ^= maskKey[i%4]
 	}
-	return result[:len(payload)]
+	fmt.Printf("data is %v , Hello is %v\n", payload, []byte("Hello"))
 }
 
 func (sb *subprotocol) close() error {
