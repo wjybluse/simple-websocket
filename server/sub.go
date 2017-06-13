@@ -50,9 +50,10 @@ type MessageHandler interface {
 //handle all payload
 //simple Frame struct
 type frame struct {
-	opcode      int  //to [4]uint
-	mask        uint //uint
-	payLoadLen  int  //[7]uint
+	fin         byte //first bit of message
+	opcode      byte //to [4]uint
+	mask        byte //uint
+	payLoadLen  byte //[7]uint
 	extLen      uint64
 	maskingKey  []byte
 	payloadData []byte
@@ -123,7 +124,8 @@ func (sb *subprotocol) pong(data []byte) error {
 }
 
 func (sb *subprotocol) Send(msg []byte) error {
-	return nil
+	_, err := sb.conn.Write(msg)
+	return err
 }
 
 func (sb *subprotocol) handleMessage() error {
@@ -131,41 +133,41 @@ func (sb *subprotocol) handleMessage() error {
 		var buffer = make([]byte, 2)
 		n, err := sb.conn.Read(buffer)
 		if err != nil {
-			log.Printf("handle error %s \n", err)
-			continue
+			//log.Printf("handle error %s \n", err)
+			return err
 		}
+		f := &frame{}
 		if n < 2 {
 			log.Printf("size is too short %s \n", err)
 			continue
 		}
-		opcode, err := sb.validate(buffer[0])
+		err = sb.validate(buffer[0], f)
 		if err != nil {
+			sb.conn.Close()
 			log.Printf("header is invalid %s \n", err)
 			continue
 		}
-		mask, pLen := sb.maskAndLen(buffer[1])
-		var extLen uint64
-		if pLen > 0 && pLen < 125 {
-			//TODO
-		} else if pLen == 126 {
+		//mask and len
+		sb.maskAndLen(buffer[1], f)
+		if f.payLoadLen == 126 {
 			var extBuffer = make([]byte, 2)
 			n, err := sb.conn.Read(extBuffer)
 			if n != 2 || err != nil {
 				log.Printf("error when read extestion len %s \n", err)
+				sb.conn.Close()
 				continue
 			}
-			extLen, _ = binary.Uvarint(extBuffer)
-		} else if pLen == 127 {
+			f.extLen, _ = binary.Uvarint(extBuffer)
+		} else if f.payLoadLen == 127 {
 			var extBuffer = make([]byte, 8)
 			n, err := sb.conn.Read(extBuffer)
 			if n != 8 || err != nil {
 				log.Printf("error when read extestion len %s \n", err)
 				continue
 			}
-			extLen, _ = binary.Uvarint(extBuffer)
+			f.extLen, _ = binary.Uvarint(extBuffer)
 		}
-		var maskKey []byte
-		if mask == 0 {
+		if f.mask == 0 {
 			//TODO
 		} else {
 			var maskBuffer = make([]byte, 4)
@@ -174,12 +176,12 @@ func (sb *subprotocol) handleMessage() error {
 				log.Printf("err mask data %s \n", err)
 				continue
 			}
-			maskKey = maskBuffer
+			f.maskingKey = maskBuffer
 		}
 		//read data from connection
-		totalLen := binary.BigEndian.Uint64([]byte{0, 0, 0, 0, 0, 0, 0, pLen}) + extLen
-		var payload = make([]byte, totalLen)
-		n, err = sb.conn.Read(payload)
+		totalLen := binary.BigEndian.Uint64([]byte{0, 0, 0, 0, 0, 0, 0, f.payLoadLen}) + f.extLen
+		f.payloadData = make([]byte, totalLen)
+		n, err = sb.conn.Read(f.payloadData)
 		if err != nil {
 			log.Printf("handle error data %s \n", err)
 			continue
@@ -188,8 +190,8 @@ func (sb *subprotocol) handleMessage() error {
 			log.Printf("read data error")
 			continue
 		}
-		payload = sb.transformed(payload, maskKey)
-		switch opcode {
+		sb.translate(f.payloadData[:totalLen], f.maskingKey)
+		switch f.opcode {
 		case OP_P:
 			sb.pong(nil)
 			break
@@ -197,10 +199,10 @@ func (sb *subprotocol) handleMessage() error {
 			sb.ping(nil)
 			break
 		case OP_T:
-			sb.handler.HandleTextMessage(string(payload), sb)
+			sb.handler.HandleTextMessage(string(f.payloadData[:totalLen]), sb)
 			break
 		case OP_B:
-			sb.handler.HandleBinaryMessage(payload, sb)
+			sb.handler.HandleBinaryMessage(f.payloadData[:totalLen], sb)
 			break
 		case OP_S:
 			sb.close()
@@ -211,42 +213,34 @@ func (sb *subprotocol) handleMessage() error {
 	}
 }
 
-func (sb *subprotocol) transformed(payload, maskKey []byte) []byte {
-	if maskKey == nil {
-		return payload
-	}
-	var result = make([]byte, len(payload))
+func (sb *subprotocol) translate(payload, maskKey []byte) {
 	for i := 0; i < len(payload); i++ {
-		result[i] = payload[i] ^ maskKey[i%4]
+		payload[i] = payload[i] ^ maskKey[i%4]
 	}
-	return result[:len(payload)]
 }
 
 func (sb *subprotocol) close() error {
-	return nil
+	return sb.conn.Close()
 }
 
-func (sb *subprotocol) maskAndLen(segment byte) (byte, byte) {
-	maskBit := segment >> 7
-	mask := maskBit & 1
-	length := (segment << 1)
-	length = length >> 1
-	return mask, length
+func (sb *subprotocol) maskAndLen(segment byte, f *frame) {
+	f.mask = (segment >> 7) & 1
+	f.payLoadLen = (segment << 1) >> 1
 }
 
 //return opcode and error
-func (sb *subprotocol) validate(frameHeader byte) (byte, error) {
+func (sb *subprotocol) validate(frameHeader byte, f *frame) error {
 	//validate fin
 	//current only support simple impl
-	var i byte
-	realValue := frameHeader >> 4
-	for i = 0; i < 4; i++ {
-		r := realValue & i
-		if r != 0 {
-			return 0, fmt.Errorf("invalid header")
+	f.fin = (frameHeader >> 7) & 1
+	v := (frameHeader << 1) >> 5
+	log.Printf("value is %b \n", v)
+	var i byte = 8
+	for ; i > 0; i = i >> 1 {
+		if v&i != 0 {
+			return fmt.Errorf("error rsv code")
 		}
 	}
-	//remove validate data
-	opcode := (frameHeader << 4) >> 4
-	return opcode, nil
+	f.opcode = (frameHeader << 4) >> 4
+	return nil
 }
