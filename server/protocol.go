@@ -6,7 +6,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/elians/websockets/utils"
+	"github.com/elians/websocket/utils"
 )
 
 const (
