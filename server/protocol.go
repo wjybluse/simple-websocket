@@ -204,6 +204,8 @@ func (w *websocket) handleConn(conn net.Conn) error {
 		hs = hs.Put("Sec-WebSocket-Extensions", ext)
 	}
 	conn.Write([]byte(hs.String()))
+	sub := newSubProtocol(conn, &defaultHandler{})
+	sub.handleMessage()
 	return nil
 }
 
