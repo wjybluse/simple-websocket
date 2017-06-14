@@ -21,11 +21,11 @@ const (
 	opg byte = 0xA //pong
 	//other for further
 
-	payloadFixLen = 126
-	payloadMaxLen = 127
+	payloadFixLen = 0x7f - 0x01
+	payloadMaxLen = 0x7f
 
-	extLenFix = 16
-	extLenMax = 64
+	extLenFix = 0x10
+	extLenMax = 0x40
 )
 
 const (
@@ -79,42 +79,42 @@ type MessageHandler interface {
 //handle all payload
 //simple Frame struct
 type frame struct {
-	fin         byte
-	opcode      byte
-	mask        byte
-	payLoadLen  byte
-	extLen      uint64
-	maskingKey  []byte
-	payloadData []byte
-	rsv         byte
+	fin     byte
+	opcode  byte
+	mask    byte
+	pl      byte
+	el      uint64
+	mkey    []byte
+	payload []byte
+	rsv     byte
 }
 
 func (f *frame) toBytes() []byte {
-	paylen := len(f.payloadData)
+	paylen := len(f.payload)
 	data := []byte{(f.fin << 7) | (f.rsv << 4) | f.opcode}
 	if paylen > payloadMaxLen {
 		var buffer []byte
 		if paylen > (1<<extLenFix)+payloadFixLen {
-			f.payLoadLen = payloadMaxLen
-			f.extLen = uint64(paylen - payloadMaxLen)
-			binary.BigEndian.PutUint64(buffer, f.extLen)
+			f.pl = payloadMaxLen
+			f.el = uint64(paylen - payloadMaxLen)
+			binary.BigEndian.PutUint64(buffer, f.el)
 
 		} else {
-			f.payLoadLen = payloadFixLen
-			f.extLen = uint64(paylen - payloadFixLen)
-			binary.BigEndian.PutUint16(buffer, uint16(f.extLen))
+			f.pl = payloadFixLen
+			f.el = uint64(paylen - payloadFixLen)
+			binary.BigEndian.PutUint16(buffer, uint16(f.el))
 		}
-		data = append(data, (f.mask<<7)|f.payLoadLen)
+		data = append(data, (f.mask<<0x07)|f.pl)
 		data = append(data, buffer...)
 
 	} else {
-		f.payLoadLen = byte(paylen)
-		data = append(data, (f.mask<<7)|f.payLoadLen)
+		f.pl = byte(paylen)
+		data = append(data, (f.mask<<7)|f.pl)
 	}
 	if f.mask == 1 {
-		data = append(data, f.maskingKey[:4]...)
+		data = append(data, f.mkey[:4]...)
 	}
-	data = append(data, f.payloadData...)
+	data = append(data, f.payload...)
 	return data
 }
 
@@ -128,17 +128,17 @@ func (f *frame) String() string {
 		maskkey: %v,
 		payload: %v,
 		rsv: %v
-	`, f.fin, f.opcode, f.mask, f.payLoadLen, f.extLen, f.maskingKey, f.payloadData, f.rsv)
+	`, f.fin, f.opcode, f.mask, f.pl, f.el, f.mkey, f.payload, f.rsv)
 }
 
-func newFrame(fin, opcode, mask, rsv byte, maskingKey, payload []byte) *frame {
+func newFrame(fin, opcode, mask, rsv byte, mkey, payload []byte) *frame {
 	return &frame{
-		fin:         fin,
-		opcode:      opcode,
-		mask:        mask,
-		rsv:         rsv,
-		maskingKey:  maskingKey,
-		payloadData: payload,
+		fin:     fin,
+		opcode:  opcode,
+		mask:    mask,
+		rsv:     rsv,
+		mkey:    mkey,
+		payload: payload,
 	}
 }
 
@@ -226,9 +226,9 @@ func (sc *subConn) Send(msg []byte) error {
 			return err
 		}
 	}
-	f := newFrame(sc.frame.fin, sc.frame.opcode, sc.frame.mask, sc.frame.rsv, sc.frame.maskingKey, content)
+	f := newFrame(sc.frame.fin, sc.frame.opcode, sc.frame.mask, sc.frame.rsv, sc.frame.mkey, content)
 	if f.mask == 1 {
-		sc.translate(f.payloadData, f.maskingKey)
+		sc.translate(f.payload, f.mkey)
 	}
 	_, err = sc.conn.Write(f.toBytes())
 	return err
@@ -253,38 +253,38 @@ func (sc *subConn) createFrame() (*frame, error) {
 	}
 	//mask and len
 	sc.setMaskAndLen(buffer[1], f)
-	if f.payLoadLen == payloadFixLen {
+	if f.pl == payloadFixLen {
 		var extBuffer = make([]byte, 2)
 		n, err := sc.conn.Read(extBuffer)
 		if n != 2 || err != nil {
 			log.Printf("error when read extestion len %s \n", err)
 			return nil, err
 		}
-		f.extLen, _ = binary.Uvarint(extBuffer)
-	} else if f.payLoadLen == payloadMaxLen {
+		f.el, _ = binary.Uvarint(extBuffer)
+	} else if f.pl == payloadMaxLen {
 		var extBuffer = make([]byte, 8)
 		n, err := sc.conn.Read(extBuffer)
 		if n != 8 || err != nil {
 			log.Printf("error when read extestion len %s \n", err)
 			return nil, fmt.Errorf("invalid size or error")
 		}
-		f.extLen, _ = binary.Uvarint(extBuffer)
+		f.el, _ = binary.Uvarint(extBuffer)
 	}
 	if f.mask == 0 {
 		//TODO
 	} else {
-		var maskBuffer = make([]byte, 4)
-		n, err := sc.conn.Read(maskBuffer)
+		var mkey = make([]byte, 4)
+		n, err := sc.conn.Read(mkey)
 		if n != 4 || err != nil {
 			log.Printf("err mask data %s \n", err)
 			return nil, err
 		}
-		f.maskingKey = maskBuffer
+		f.mkey = mkey
 	}
 	//read data from connection
-	totalLen := binary.BigEndian.Uint64([]byte{0, 0, 0, 0, 0, 0, 0, f.payLoadLen}) + f.extLen
-	f.payloadData = make([]byte, totalLen)
-	n, err = sc.conn.Read(f.payloadData)
+	totalLen := binary.BigEndian.Uint64([]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, f.pl}) + f.el
+	f.payload = make([]byte, totalLen)
+	n, err = sc.conn.Read(f.payload)
 	if err != nil {
 		log.Printf("handle error data %s \n", err)
 		return nil, err
@@ -293,9 +293,9 @@ func (sc *subConn) createFrame() (*frame, error) {
 		log.Printf("read data error")
 		return nil, err
 	}
-	sc.translate(f.payloadData[:totalLen], f.maskingKey)
+	sc.translate(f.payload[:totalLen], f.mkey)
 	if sc.enableDeflat() {
-		f.payloadData, _ = sc.decode(f.payloadData[:totalLen])
+		f.payload, _ = sc.decode(f.payload[:totalLen])
 	}
 	if err != nil {
 		log.Printf("decode failed %s \n", err)
@@ -314,16 +314,16 @@ func (sc *subConn) handleMessage() error {
 		sc.frame = f
 		switch f.opcode {
 		case opp:
-			sc.pong(f.payloadData)
+			sc.pong(f.payload)
 			break
 		case opg:
-			sc.ping(f.payloadData)
+			sc.ping(f.payload)
 			break
 		case opt:
-			sc.handler.HandleTextMessage(string(f.payloadData), sc)
+			sc.handler.HandleTextMessage(string(f.payload), sc)
 			break
 		case opb:
-			sc.handler.HandleBinMessage(f.payloadData, sc)
+			sc.handler.HandleBinMessage(f.payload, sc)
 			break
 		case ops:
 			sc.close(normlClose)
@@ -345,8 +345,8 @@ func (sc *subConn) translate(payload, maskKey []byte) {
 }
 
 func (sc *subConn) close(status int16) error {
-	log.Printf("close connection....")
-	f := newFrame(0x0, ops, 0x0, 0x0, nil, []byte{byte(status >> 8), byte(status)})
+	// bigEndian or littleEndian?
+	f := newFrame(0x0, ops, 0x0, 0x0, nil, []byte{byte(status >> 0x08), byte(status)})
 	_, err := sc.conn.Write(f.toBytes())
 	if err != nil {
 		log.Printf("send data error %s \n", err)
@@ -355,15 +355,14 @@ func (sc *subConn) close(status int16) error {
 }
 
 func (sc *subConn) setMaskAndLen(segment byte, f *frame) {
-	//shift right
-	f.mask = (segment & 0x80) >> 7
-	f.payLoadLen = segment & 0x7f
+	f.mask = (segment & 0x80) >> 0x07
+	f.pl = segment & 0x7f
 }
 
-//return opcode and error
+//set opcode ,fin and rsv
 func (sc *subConn) setOpcode(frameHeader byte, f *frame) error {
-	f.fin = (frameHeader & 0x80) >> 7
-	f.rsv = (frameHeader & 0x70) >> 4
+	f.fin = (frameHeader & 0x80) >> 0x07
+	f.rsv = (frameHeader & 0x70) >> 0x04
 	f.opcode = frameHeader & 0x0f
 	return nil
 }
