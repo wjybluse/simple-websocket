@@ -172,7 +172,7 @@ func (w *websocket) handleConn(conn net.Conn) error {
 		rsp = fmt.Sprintf(responseHeader+"%s\r\n\r\n", accept, "Sec-WebSocket-Extensions:"+ext)
 	}
 	conn.Write([]byte(rsp))
-	sub := NewHandler(conn, &defaultHandler{}, extensions)
+	sub := NewHandler(conn, &dhanler{}, extensions)
 	sub.handleMessage()
 	return nil
 }

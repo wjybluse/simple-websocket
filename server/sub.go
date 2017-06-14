@@ -13,20 +13,44 @@ import (
 )
 
 const (
-	//this is op code
-	OP_C byte = 0x0 //denotes a continuation frame
-	OP_T byte = 0x1 //denotes a text frame
-	OP_B byte = 0x2 //denotes a binary frame
-	OP_S byte = 0x8 //denotes a connection close
-	OP_P byte = 0x9 //ping
-	OP_G byte = 0xA //pong
+	opc byte = 0x0 //denotes a continuation frame
+	opt byte = 0x1 //denotes a text frame
+	opb byte = 0x2 //denotes a binary frame
+	ops byte = 0x8 //denotes a connection close
+	opp byte = 0x9 //ping
+	opg byte = 0xA //pong
 	//other for further
+
+	payloadFixLen = 126
+	payloadMaxLen = 127
+
+	extLenFix = 16
+	extLenMax = 64
+)
+
+const (
+	normlClose int16 = 1000 + iota
+	goAway
+	protocolErr
+	acceptErr
+	reserved
+	reserved1
+	abnormal
+	typeErr
+	outsideErr
+	msgBigErr
+	extensionNotSupport
+	requestErr
+	tlsErr
 )
 
 //MessageHandler ...
 type MessageHandler interface {
 	HandleTextMessage(msg string, reply Handler) error
-	HandleBinaryMessage(msg []byte, reply Handler) error
+	HandleBinMessage(msg []byte, reply Handler) error
+	HandleError(err []byte, reply Handler) error
+	HandlePing(data []byte, reply Handler) error
+	HandlePong(data []byte, reply Handler) error
 }
 
 //define header
@@ -68,16 +92,16 @@ type frame struct {
 func (f *frame) toBytes() []byte {
 	paylen := len(f.payloadData)
 	data := []byte{(f.fin << 7) | (f.rsv << 4) | f.opcode}
-	if paylen > 127 {
+	if paylen > payloadMaxLen {
 		var buffer []byte
-		if paylen > (1<<16)+126 {
-			f.payLoadLen = 127
-			f.extLen = uint64(paylen - 127)
+		if paylen > (1<<extLenFix)+payloadFixLen {
+			f.payLoadLen = payloadMaxLen
+			f.extLen = uint64(paylen - payloadMaxLen)
 			binary.BigEndian.PutUint64(buffer, f.extLen)
 
 		} else {
-			f.payLoadLen = 126
-			f.extLen = uint64(paylen - 126)
+			f.payLoadLen = payloadFixLen
+			f.extLen = uint64(paylen - payloadFixLen)
 			binary.BigEndian.PutUint16(buffer, uint16(f.extLen))
 		}
 		data = append(data, (f.mask<<7)|f.payLoadLen)
@@ -118,20 +142,32 @@ func newFrame(fin, opcode, mask, rsv byte, maskingKey, payload []byte) *frame {
 	}
 }
 
-type defaultHandler struct {
+type dhanler struct {
 }
 
-func (d *defaultHandler) HandleTextMessage(msg string, reply Handler) error {
+func (d *dhanler) HandleTextMessage(msg string, reply Handler) error {
 	log.Printf("handle text data %s \n", msg)
 	return reply.Send([]byte("nihao"))
 }
 
-func (d *defaultHandler) HandleBinaryMessage(msg []byte, reply Handler) error {
+func (d *dhanler) HandleBinMessage(msg []byte, reply Handler) error {
 	log.Printf("handle binary data %s \n", msg)
 	return nil
 }
 
-type subprotocol struct {
+func (d *dhanler) HandleError(err []byte, reply Handler) error {
+	return nil
+}
+
+func (d *dhanler) HandlePing(data []byte, reply Handler) error {
+	return nil
+}
+
+func (d *dhanler) HandlePong(data []byte, reply Handler) error {
+	return nil
+}
+
+type subConn struct {
 	conn       net.Conn
 	handler    MessageHandler
 	frame      *frame
@@ -149,15 +185,15 @@ type Handler interface {
 
 //NewHandler handler sub protocol
 func NewHandler(conn net.Conn, handler MessageHandler, extensions []string) Handler {
-	return &subprotocol{
+	return &subConn{
 		conn:       conn,
 		handler:    handler,
 		extensions: extensions,
 	}
 }
 
-func (sb *subprotocol) enableDeflat() bool {
-	for _, e := range sb.extensions {
+func (sc *subConn) enableDeflat() bool {
+	for _, e := range sc.extensions {
 		if strings.Contains(e, "deflat") {
 			return true
 		}
@@ -165,22 +201,24 @@ func (sb *subprotocol) enableDeflat() bool {
 	return false
 }
 
-func (sb *subprotocol) ping(data []byte) error {
-	f := newFrame(0, OP_P, 0, 0, nil, []byte("are u ok?"))
-	_, err := sb.conn.Write(f.toBytes())
+func (sc *subConn) ping(data []byte) error {
+	log.Printf("send ping frame,pong message is %s \n", string(data))
+	f := newFrame(0, opp, 0, 0, nil, []byte("are u ok?"))
+	_, err := sc.conn.Write(f.toBytes())
 	return err
 }
 
-func (sb *subprotocol) pong(data []byte) error {
-	f := newFrame(0, OP_G, 0, 0, nil, []byte("i'm mibody"))
-	_, err := sb.conn.Write(f.toBytes())
+func (sc *subConn) pong(data []byte) error {
+	log.Printf("send pong frame,the ping message is %s \n", string(data))
+	f := newFrame(0, opg, 0, 0, nil, []byte("i'm mibody"))
+	_, err := sc.conn.Write(f.toBytes())
 	return err
 }
 
-func (sb *subprotocol) Send(msg []byte) error {
+func (sc *subConn) Send(msg []byte) error {
 	content := msg
 	var err error
-	if sb.enableDeflat() {
+	if sc.enableDeflat() {
 		deflat := alg.Deflat{}
 		content, err = deflat.Encoding(msg)
 		if err != nil {
@@ -188,15 +226,17 @@ func (sb *subprotocol) Send(msg []byte) error {
 			return err
 		}
 	}
-	f := newFrame(sb.frame.fin, sb.frame.opcode, sb.frame.mask, sb.frame.rsv, sb.frame.maskingKey, content)
-	_, err = sb.conn.Write(f.toBytes())
-	log.Printf("handle send data result is %s ,data is %v \n", err, f)
+	f := newFrame(sc.frame.fin, sc.frame.opcode, sc.frame.mask, sc.frame.rsv, sc.frame.maskingKey, content)
+	if f.mask == 1 {
+		sc.translate(f.payloadData, f.maskingKey)
+	}
+	_, err = sc.conn.Write(f.toBytes())
 	return err
 }
 
-func (sb *subprotocol) createFrame() (*frame, error) {
+func (sc *subConn) createFrame() (*frame, error) {
 	var buffer = make([]byte, 2)
-	n, err := sb.conn.Read(buffer)
+	n, err := sc.conn.Read(buffer)
 	if err != nil {
 		//log.Printf("handle error %s \n", err)
 		return nil, err
@@ -206,24 +246,24 @@ func (sb *subprotocol) createFrame() (*frame, error) {
 		log.Printf("size is too short %s \n", err)
 		return nil, fmt.Errorf("error size")
 	}
-	err = sb.validate(buffer[0], f)
+	err = sc.setOpcode(buffer[0], f)
 	if err != nil {
 		log.Printf("header is invalid %s \n", err)
 		return nil, err
 	}
 	//mask and len
-	sb.maskAndLen(buffer[1], f)
-	if f.payLoadLen == 126 {
+	sc.setMaskAndLen(buffer[1], f)
+	if f.payLoadLen == payloadFixLen {
 		var extBuffer = make([]byte, 2)
-		n, err := sb.conn.Read(extBuffer)
+		n, err := sc.conn.Read(extBuffer)
 		if n != 2 || err != nil {
 			log.Printf("error when read extestion len %s \n", err)
 			return nil, err
 		}
 		f.extLen, _ = binary.Uvarint(extBuffer)
-	} else if f.payLoadLen == 127 {
+	} else if f.payLoadLen == payloadMaxLen {
 		var extBuffer = make([]byte, 8)
-		n, err := sb.conn.Read(extBuffer)
+		n, err := sc.conn.Read(extBuffer)
 		if n != 8 || err != nil {
 			log.Printf("error when read extestion len %s \n", err)
 			return nil, fmt.Errorf("invalid size or error")
@@ -234,7 +274,7 @@ func (sb *subprotocol) createFrame() (*frame, error) {
 		//TODO
 	} else {
 		var maskBuffer = make([]byte, 4)
-		n, err := sb.conn.Read(maskBuffer)
+		n, err := sc.conn.Read(maskBuffer)
 		if n != 4 || err != nil {
 			log.Printf("err mask data %s \n", err)
 			return nil, err
@@ -244,7 +284,7 @@ func (sb *subprotocol) createFrame() (*frame, error) {
 	//read data from connection
 	totalLen := binary.BigEndian.Uint64([]byte{0, 0, 0, 0, 0, 0, 0, f.payLoadLen}) + f.extLen
 	f.payloadData = make([]byte, totalLen)
-	n, err = sb.conn.Read(f.payloadData)
+	n, err = sc.conn.Read(f.payloadData)
 	if err != nil {
 		log.Printf("handle error data %s \n", err)
 		return nil, err
@@ -253,72 +293,77 @@ func (sb *subprotocol) createFrame() (*frame, error) {
 		log.Printf("read data error")
 		return nil, err
 	}
-	sb.translate(f.payloadData[:totalLen], f.maskingKey)
-	if sb.enableDeflat() {
-		f.payloadData, _ = sb.decode(f.payloadData[:totalLen])
+	sc.translate(f.payloadData[:totalLen], f.maskingKey)
+	if sc.enableDeflat() {
+		f.payloadData, _ = sc.decode(f.payloadData[:totalLen])
 	}
 	if err != nil {
 		log.Printf("decode failed %s \n", err)
-		sb.conn.Close()
+		sc.conn.Close()
 		return nil, err
 	}
 	return f, nil
 }
 
-func (sb *subprotocol) handleMessage() error {
+func (sc *subConn) handleMessage() error {
 	for {
-		f, err := sb.createFrame()
+		f, err := sc.createFrame()
 		if err != nil {
 			continue
 		}
-		sb.frame = f
+		sc.frame = f
 		switch f.opcode {
-		case OP_P:
-			sb.pong(nil)
+		case opp:
+			sc.pong(f.payloadData)
 			break
-		case OP_G:
-			sb.ping(nil)
+		case opg:
+			sc.ping(f.payloadData)
 			break
-		case OP_T:
-			sb.handler.HandleTextMessage(string(f.payloadData), sb)
+		case opt:
+			sc.handler.HandleTextMessage(string(f.payloadData), sc)
 			break
-		case OP_B:
-			sb.handler.HandleBinaryMessage(f.payloadData, sb)
+		case opb:
+			sc.handler.HandleBinMessage(f.payloadData, sc)
 			break
-		case OP_S:
-			sb.close()
+		case ops:
+			sc.close(normlClose)
 			break
 		default:
+			sc.close(acceptErr)
 			break
 		}
 	}
 }
-func (sb *subprotocol) decode(payload []byte) ([]byte, error) {
+func (sc *subConn) decode(payload []byte) ([]byte, error) {
 	deflat := alg.Deflat{}
 	return deflat.Decoding(payload)
 }
-func (sb *subprotocol) translate(payload, maskKey []byte) {
+func (sc *subConn) translate(payload, maskKey []byte) {
 	for i := 0; i < len(payload); i++ {
 		payload[i] = payload[i] ^ maskKey[i%4]
 	}
 }
 
-func (sb *subprotocol) close() error {
-	return sb.conn.Close()
+func (sc *subConn) close(status int16) error {
+	log.Printf("close connection....")
+	f := newFrame(0x0, ops, 0x0, 0x0, nil, []byte{byte(status >> 8), byte(status)})
+	_, err := sc.conn.Write(f.toBytes())
+	if err != nil {
+		log.Printf("send data error %s \n", err)
+	}
+	return sc.conn.Close()
 }
 
-func (sb *subprotocol) maskAndLen(segment byte, f *frame) {
-	f.mask = (segment >> 7) & 1
-	f.payLoadLen = (segment << 1) >> 1
+func (sc *subConn) setMaskAndLen(segment byte, f *frame) {
+	//shift right
+	f.mask = (segment & 0x80) >> 7
+	f.payLoadLen = segment & 0x7f
 }
 
 //return opcode and error
-func (sb *subprotocol) validate(frameHeader byte, f *frame) error {
-	//validate fin
-	//current only support simple impl
-	f.fin = (frameHeader >> 7) & 1
-	v := (frameHeader << 1) >> 5
-	f.rsv = v
-	f.opcode = (frameHeader << 4) >> 4
+func (sc *subConn) setOpcode(frameHeader byte, f *frame) error {
+	f.fin = (frameHeader & 0x80) >> 7
+	f.rsv = (frameHeader & 0x70) >> 4
+	f.opcode = frameHeader & 0x0f
 	return nil
 }
