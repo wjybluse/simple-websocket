@@ -228,7 +228,7 @@ func (sc *subConn) Send(msg []byte) error {
 	}
 	f := newFrame(sc.frame.fin, sc.frame.opcode, sc.frame.mask, sc.frame.rsv, sc.frame.mkey, content)
 	if f.mask == 1 {
-		sc.translate(f.payload, f.mkey)
+		translate(f.payload, f.mkey)
 	}
 	_, err = sc.conn.Write(f.toBytes())
 	return err
@@ -246,13 +246,9 @@ func (sc *subConn) createFrame() (*frame, error) {
 		log.Printf("size is too short %s \n", err)
 		return nil, fmt.Errorf("error size")
 	}
-	err = sc.setOpcode(buffer[0], f)
-	if err != nil {
-		log.Printf("header is invalid %s \n", err)
-		return nil, err
-	}
+	setOpcode(buffer[0], f)
 	//mask and len
-	sc.setMaskAndLen(buffer[1], f)
+	setMaskAndLen(buffer[1], f)
 	if f.pl == payloadFixLen {
 		var extBuffer = make([]byte, 2)
 		n, err := sc.conn.Read(extBuffer)
@@ -293,7 +289,7 @@ func (sc *subConn) createFrame() (*frame, error) {
 		log.Printf("read data error")
 		return nil, err
 	}
-	sc.translate(f.payload[:totalLen], f.mkey)
+	translate(f.payload[:totalLen], f.mkey)
 	if sc.enableDeflat() {
 		f.payload, _ = sc.decode(f.payload[:totalLen])
 	}
@@ -338,31 +334,31 @@ func (sc *subConn) decode(payload []byte) ([]byte, error) {
 	deflat := alg.Deflat{}
 	return deflat.Decoding(payload)
 }
-func (sc *subConn) translate(payload, maskKey []byte) {
+func translate(payload, maskKey []byte) {
 	for i := 0; i < len(payload); i++ {
 		payload[i] = payload[i] ^ maskKey[i%4]
 	}
 }
 
-func (sc *subConn) close(status int16) error {
+func (sc *subConn) close(closeCode int16) error {
 	// bigEndian or littleEndian?
-	f := newFrame(0x0, ops, 0x0, 0x0, nil, []byte{byte(status >> 0x08), byte(status)})
+	f := newFrame(0x0, ops, 0x0, 0x0, nil, []byte{byte(closeCode >> 0x08), byte(closeCode)})
 	_, err := sc.conn.Write(f.toBytes())
 	if err != nil {
-		log.Printf("send data error %s \n", err)
+		log.Printf("send close frame error %s \n", err)
 	}
 	return sc.conn.Close()
 }
 
-func (sc *subConn) setMaskAndLen(segment byte, f *frame) {
+func setMaskAndLen(segment byte, f *frame) {
 	f.mask = (segment & 0x80) >> 0x07
 	f.pl = segment & 0x7f
 }
 
 //set opcode ,fin and rsv
-func (sc *subConn) setOpcode(frameHeader byte, f *frame) error {
-	f.fin = (frameHeader & 0x80) >> 0x07
-	f.rsv = (frameHeader & 0x70) >> 0x04
-	f.opcode = frameHeader & 0x0f
-	return nil
+func setOpcode(segment byte, f *frame) {
+	//one byte as one segment
+	f.fin = (segment & 0x80) >> 0x07
+	f.rsv = (segment & 0x70) >> 0x04
+	f.opcode = segment & 0x0f
 }
