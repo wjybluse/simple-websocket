@@ -91,7 +91,7 @@ type frame struct {
 
 func (f *frame) toBytes() []byte {
 	paylen := len(f.payload)
-	data := []byte{(f.fin << 7) | (f.rsv << 4) | f.opcode}
+	data := []byte{(f.fin << 0x07) | (f.rsv << 0x04) | f.opcode}
 	if paylen > payloadMaxLen {
 		var buffer []byte
 		if paylen > (1<<extLenFix)+payloadFixLen {
@@ -177,8 +177,8 @@ type subConn struct {
 //Handler ... simple interface for websocket impl
 type Handler interface {
 	//simple websocket method
-	ping(data []byte) error
-	pong(data []byte) error
+	Ping(data []byte) error
+	Pong(data []byte) error
 	Send(msg []byte) error
 	handleMessage() error
 }
@@ -194,23 +194,21 @@ func NewHandler(conn net.Conn, handler MessageHandler, extensions []string) Hand
 
 func (sc *subConn) enableDeflat() bool {
 	for _, e := range sc.extensions {
-		if strings.Contains(e, "deflat") {
+		if strings.Contains(e, "permessage-deflate") {
 			return true
 		}
 	}
 	return false
 }
 
-func (sc *subConn) ping(data []byte) error {
-	log.Printf("send ping frame,pong message is %s \n", string(data))
-	f := newFrame(0, opp, 0, 0, nil, []byte("are u ok?"))
+func (sc *subConn) Ping(data []byte) error {
+	f := newFrame(0, opp, 0, 0, nil, data)
 	_, err := sc.conn.Write(f.toBytes())
 	return err
 }
 
-func (sc *subConn) pong(data []byte) error {
-	log.Printf("send pong frame,the ping message is %s \n", string(data))
-	f := newFrame(0, opg, 0, 0, nil, []byte("i'm mibody"))
+func (sc *subConn) Pong(data []byte) error {
+	f := newFrame(0, opg, 0, 0, nil, data)
 	_, err := sc.conn.Write(f.toBytes())
 	return err
 }
@@ -238,12 +236,12 @@ func (sc *subConn) createFrame() (*frame, error) {
 	var buffer = make([]byte, 2)
 	n, err := sc.conn.Read(buffer)
 	if err != nil {
-		//log.Printf("handle error %s \n", err)
 		return nil, err
 	}
 	f := &frame{}
 	if n < 2 {
 		log.Printf("size is too short %s \n", err)
+		sc.conn.Write(closeFrame(abnormal).toBytes())
 		return nil, fmt.Errorf("error size")
 	}
 	setOpcode(buffer[0], f)
@@ -253,7 +251,7 @@ func (sc *subConn) createFrame() (*frame, error) {
 		var extBuffer = make([]byte, 2)
 		n, err := sc.conn.Read(extBuffer)
 		if n != 2 || err != nil {
-			log.Printf("error when read extestion len %s \n", err)
+			sc.conn.Write(closeFrame(abnormal).toBytes())
 			return nil, err
 		}
 		f.el, _ = binary.Uvarint(extBuffer)
@@ -262,13 +260,12 @@ func (sc *subConn) createFrame() (*frame, error) {
 		n, err := sc.conn.Read(extBuffer)
 		if n != 8 || err != nil {
 			log.Printf("error when read extestion len %s \n", err)
+			sc.conn.Write(closeFrame(abnormal).toBytes())
 			return nil, fmt.Errorf("invalid size or error")
 		}
 		f.el, _ = binary.Uvarint(extBuffer)
 	}
-	if f.mask == 0 {
-		//TODO
-	} else {
+	if f.mask != 0 {
 		var mkey = make([]byte, 4)
 		n, err := sc.conn.Read(mkey)
 		if n != 4 || err != nil {
@@ -295,7 +292,7 @@ func (sc *subConn) createFrame() (*frame, error) {
 	}
 	if err != nil {
 		log.Printf("decode failed %s \n", err)
-		sc.conn.Close()
+		sc.conn.Write(closeFrame(extensionNotSupport).toBytes())
 		return nil, err
 	}
 	return f, nil
@@ -305,15 +302,16 @@ func (sc *subConn) handleMessage() error {
 	for {
 		f, err := sc.createFrame()
 		if err != nil {
+			sc.conn.Close()
 			continue
 		}
 		sc.frame = f
 		switch f.opcode {
 		case opp:
-			sc.pong(f.payload)
+			sc.handler.HandlePing(f.payload, sc)
 			break
 		case opg:
-			sc.ping(f.payload)
+			sc.handler.HandlePong(f.payload, sc)
 			break
 		case opt:
 			sc.handler.HandleTextMessage(string(f.payload), sc)
@@ -342,12 +340,15 @@ func translate(payload, maskKey []byte) {
 
 func (sc *subConn) close(closeCode int16) error {
 	// bigEndian or littleEndian?
-	f := newFrame(0x0, ops, 0x0, 0x0, nil, []byte{byte(closeCode >> 0x08), byte(closeCode)})
-	_, err := sc.conn.Write(f.toBytes())
+	_, err := sc.conn.Write(closeFrame(closeCode).toBytes())
 	if err != nil {
 		log.Printf("send close frame error %s \n", err)
 	}
 	return sc.conn.Close()
+}
+
+func closeFrame(code int16) *frame {
+	return newFrame(0x0, ops, 0x0, 0x0, nil, []byte{byte(code >> 0x08), byte(code)})
 }
 
 func setMaskAndLen(segment byte, f *frame) {
