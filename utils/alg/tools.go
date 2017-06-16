@@ -55,7 +55,8 @@ func (d *Deflat) Encoding(value []byte) ([]byte, error) {
 
 //Decoding decode value
 func (d *Deflat) Decoding(value []byte) ([]byte, error) {
-	reader := flate.NewReader(bytes.NewBuffer(append(value, []byte("\x00\x00\xff\xff\x01\x00\x00\xff\xff")...)))
+	//if message use deflat alg ,append \x00\x00\xff\xff\x01\x00\x00\xff\xff
+	reader := flate.NewReader(bytes.NewBuffer(append(value, []byte{0x00, 0x00, 0xff, 0xff}...)))
 	var buffer bytes.Buffer
 	io.Copy(&buffer, reader)
 	return buffer.Bytes(), nil

@@ -147,7 +147,7 @@ type dhanler struct {
 
 func (d *dhanler) HandleTextMessage(msg string, reply Handler) error {
 	log.Printf("handle text data %s \n", msg)
-	return reply.Send([]byte("nihao"))
+	return reply.Send([]byte("are u ok ?"))
 }
 
 func (d *dhanler) HandleBinMessage(msg []byte, reply Handler) error {
@@ -319,6 +319,7 @@ func (sc *subConn) handleMessage() error {
 			sc.conn.Close()
 			continue
 		}
+		log.Printf("the frame is %v \n", f)
 		sc.frame = f
 		switch f.opcode {
 		case opp:

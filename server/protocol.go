@@ -78,10 +78,10 @@ func (hs Header) PutAll(pairs map[string]string) {
 
 //RequestURL ...
 func (hs Header) RequestURL() string {
-	if hs.headers["Request-URI"] == nil {
+	if hs.headers["Request-URL"] == nil {
 		return ""
 	}
-	return hs.headers["Request-URI"][0]
+	return hs.headers["Request-URL"][0]
 }
 
 //Method get method
@@ -152,6 +152,7 @@ func (w *websocket) handleConn(conn net.Conn) error {
 	if err != nil {
 		defer conn.Close()
 		if strings.Contains(err.Error(), "version") {
+			//write bad request header with invalid version
 			conn.Write([]byte(badRequest + "Sec-WebSocket-Version:13,8,7\r\n\r\n"))
 		} else {
 			conn.Write([]byte(badRequest + "\r\n"))
@@ -189,7 +190,7 @@ func (w *websocket) parserHeaders(buf []byte) *Header {
 	}
 	header := NewHeader()
 	header.Put("method", arr[0])
-	header.Put("Request-URI", arr[1])
+	header.Put("Request-URL", arr[1])
 	header.Put("HTTP-Version", arr[2])
 	for _, line := range lines[1:] {
 		if strings.TrimSpace(line) == "" {
