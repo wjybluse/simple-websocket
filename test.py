@@ -9,7 +9,7 @@ if __name__ == '__main__':
     t = threading.Thread()
     def run():
         while True:
-            ws.send(uuid.uuid4().get_bytes(),opcode=websocket.ABNF.OPCODE_BINARY)
+            ws.send(str(uuid.uuid4()))
             data = ws.recv_data()
             print data
             time.sleep(1)

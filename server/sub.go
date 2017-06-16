@@ -109,7 +109,7 @@ func (f *frame) toBytes() []byte {
 
 	} else {
 		f.pl = byte(paylen)
-		data = append(data, (f.mask<<7)|f.pl)
+		data = append(data, (f.mask<<0x07)|f.pl)
 	}
 	if f.mask == 1 {
 		data = append(data, f.mkey[:4]...)
@@ -241,56 +241,62 @@ func (sc *subConn) Send(msg []byte) error {
 }
 
 func (sc *subConn) createFrame() (*frame, error) {
-	var buffer = make([]byte, 2)
+	//read maybe all frame
+	var buffer = make([]byte, 1024)
 	n, err := sc.conn.Read(buffer)
 	if err != nil {
 		return nil, err
 	}
 	f := &frame{}
 	if n < 2 {
-		log.Printf("size is too short %s \n", err)
 		sc.conn.Write(closeFrame(abnormal).toBytes())
 		return nil, fmt.Errorf("error size")
 	}
 	setOpcode(buffer[0], f)
 	//mask and len
 	setMaskAndLen(buffer[1], f)
+	payloadIdx := 2
 	if f.pl == payloadFixLen {
-		var extBuffer = make([]byte, 2)
-		n, err := sc.conn.Read(extBuffer)
-		if n != 2 || err != nil {
+		if n < 4 {
 			sc.conn.Write(closeFrame(abnormal).toBytes())
-			return nil, err
+			return nil, fmt.Errorf("error ext len")
 		}
-		f.el, _ = binary.Uvarint(extBuffer)
+		f.el, _ = binary.Uvarint(buffer[2:4])
+		payloadIdx = 4
 	} else if f.pl == payloadMaxLen {
-		var extBuffer = make([]byte, 8)
-		n, err := sc.conn.Read(extBuffer)
-		if n != 8 || err != nil {
-			log.Printf("error when read extestion len %s \n", err)
+		if n < 8 {
 			sc.conn.Write(closeFrame(abnormal).toBytes())
-			return nil, fmt.Errorf("invalid size or error")
+			return nil, fmt.Errorf("error ext len")
 		}
-		f.el, _ = binary.Uvarint(extBuffer)
+		f.el, _ = binary.Uvarint(buffer[2:10])
+		payloadIdx = 10
 	}
-	if f.mask != 0 {
-		var mkey = make([]byte, 4)
-		n, err := sc.conn.Read(mkey)
-		if n != 4 || err != nil {
-			log.Printf("err mask data %s \n", err)
-			return nil, err
+	if f.mask == 1 {
+		if n < payloadIdx+4 {
+			sc.conn.Write(closeFrame(abnormal).toBytes())
+			return nil, fmt.Errorf("invaild mask")
 		}
-		f.mkey = mkey
+		f.mkey = buffer[payloadIdx : payloadIdx+4]
+		payloadIdx = payloadIdx + 4
 	}
 	//read data from connection
 	totalLen := binary.BigEndian.Uint64([]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, f.pl}) + f.el
-	f.payload = make([]byte, totalLen)
-	n, err = sc.conn.Read(f.payload)
+	f.payload = buffer[payloadIdx:n]
+	if uint64(n) < uint64(payloadIdx)+totalLen {
+		rl := uint64(payloadIdx) + totalLen - uint64(n)
+		var b = make([]byte, rl)
+		n, err = sc.conn.Read(b)
+		if uint64(n) != rl {
+			sc.conn.Write(closeFrame(outsideErr).toBytes())
+			return nil, fmt.Errorf("error data frame")
+		}
+		f.payload = append(f.payload, b...)
+	}
 	if err != nil {
 		log.Printf("handle error data %s \n", err)
 		return nil, err
 	}
-	if uint64(n) != totalLen {
+	if uint64(n-payloadIdx) != totalLen {
 		log.Printf("read data error")
 		return nil, err
 	}
