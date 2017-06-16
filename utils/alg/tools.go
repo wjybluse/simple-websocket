@@ -4,7 +4,18 @@ import (
 	"bytes"
 	"compress/flate"
 	"io"
+	"math/rand"
 )
+
+var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+func randSeq(n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letters[rand.Intn(len(letters))]
+	}
+	return string(b)
+}
 
 //Encode encode value
 type Encode interface {
@@ -27,7 +38,19 @@ func (d *Deflat) Encoding(value []byte) ([]byte, error) {
 		return nil, err
 	}
 	writer.Write(value)
-	return buffer.Bytes(), nil
+	writer.Close()
+	result := buffer.Bytes()
+	if len(result) < 5 {
+		return append(result, 0x0, 0x0), nil
+	}
+	lastBytes := result[len(result)-4:]
+	deflatBlock := []byte{0x00, 0x00, 0xff, 0xff}
+	for idx := range deflatBlock {
+		if lastBytes[idx] != deflatBlock[idx] {
+			return append(result, 0x0, 0x0), nil
+		}
+	}
+	return result[:len(result)-5], nil
 }
 
 //Decoding decode value
@@ -36,4 +59,9 @@ func (d *Deflat) Decoding(value []byte) ([]byte, error) {
 	var buffer bytes.Buffer
 	io.Copy(&buffer, reader)
 	return buffer.Bytes(), nil
+}
+
+//RandomMask random mask gen
+func RandomMask() []byte {
+	return []byte(randSeq(4))
 }

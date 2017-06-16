@@ -152,19 +152,22 @@ func (d *dhanler) HandleTextMessage(msg string, reply Handler) error {
 
 func (d *dhanler) HandleBinMessage(msg []byte, reply Handler) error {
 	log.Printf("handle binary data %s \n", msg)
-	return nil
+	return reply.Send(alg.RandomMask())
 }
 
 func (d *dhanler) HandleError(err []byte, reply Handler) error {
+	log.Printf("handle error message %s \n", string(err))
 	return nil
 }
 
 func (d *dhanler) HandlePing(data []byte, reply Handler) error {
-	return nil
+	log.Printf("handle ping message %s \n", string(data))
+	return reply.Pong([]byte("i'm mibody!"))
 }
 
 func (d *dhanler) HandlePong(data []byte, reply Handler) error {
-	return nil
+	log.Printf("handle pong message %s \n", string(data))
+	return reply.Ping([]byte("are u ok?"))
 }
 
 type subConn struct {
@@ -224,10 +227,15 @@ func (sc *subConn) Send(msg []byte) error {
 			return err
 		}
 	}
-	f := newFrame(sc.frame.fin, sc.frame.opcode, sc.frame.mask, sc.frame.rsv, sc.frame.mkey, content)
-	if f.mask == 1 {
-		translate(f.payload, f.mkey)
-	}
+	//mask not allowed in server side???
+	// maskkey := alg.RandomMask()
+	// if sc.frame.mask == 0 {
+	// 	maskkey = nil
+	// }
+	f := newFrame(sc.frame.fin, sc.frame.opcode, 0x0, sc.frame.rsv, nil, content)
+	// if f.mask == 1 {
+	// 	translate(f.payload, f.mkey)
+	// }
 	_, err = sc.conn.Write(f.toBytes())
 	return err
 }
