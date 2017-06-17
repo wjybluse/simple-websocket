@@ -56,7 +56,8 @@ func (d *Deflat) Encoding(value []byte) ([]byte, error) {
 //Decoding decode value
 func (d *Deflat) Decoding(value []byte) ([]byte, error) {
 	//if message use deflat alg ,append \x00\x00\xff\xff\x01\x00\x00\xff\xff
-	reader := flate.NewReader(bytes.NewBuffer(append(value, []byte{0x00, 0x00, 0xff, 0xff}...)))
+	//reader := flate.NewReader(bytes.NewBuffer(append(value, []byte{0x00, 0x00, 0xff, 0xff}...)))
+	reader := flate.NewReader(bytes.NewBuffer(append(value, []byte("\x00\x00\xff\xff\x01\x00\x00\xff\xff")...)))
 	var buffer bytes.Buffer
 	io.Copy(&buffer, reader)
 	return buffer.Bytes(), nil
@@ -65,4 +66,16 @@ func (d *Deflat) Decoding(value []byte) ([]byte, error) {
 //RandomMask random mask gen
 func RandomMask() []byte {
 	return []byte(randSeq(4))
+}
+
+//Translate translate message
+func Translate(payload, maskKey []byte) {
+	for i := 0; i < len(payload); i++ {
+		payload[i] = payload[i] ^ maskKey[i%4]
+	}
+}
+
+//ByteToUint16 bytes array to uint16
+func ByteToUint16(v []byte) uint16 {
+	return uint16(v[0])<<8 | uint16(v[1])
 }

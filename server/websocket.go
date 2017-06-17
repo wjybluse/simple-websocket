@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/binary"
+	"io"
 	"log"
 	"net"
+	"time"
 
 	"strings"
 
@@ -44,6 +46,21 @@ const (
 	tlsErr
 )
 
+var (
+	reasons = map[int16]string{
+		normlClose:          "indicates a normal closure",
+		goAway:              "endpoint is going away",
+		protocolErr:         "protocol error",
+		acceptErr:           "received a type of data it cannot accept",
+		reserved:            "Reserved",
+		typeErr:             "invalid encoding",
+		outsideErr:          "other error,policy?",
+		msgBigErr:           "msg is too big",
+		extensionNotSupport: "server extension error",
+		requestErr:          "unexcept error",
+	}
+)
+
 //MessageHandler ...
 type MessageHandler interface {
 	HandleTextMessage(msg string, reply Handler) error
@@ -51,6 +68,7 @@ type MessageHandler interface {
 	HandleError(err []byte, reply Handler) error
 	HandlePing(data []byte, reply Handler) error
 	HandlePong(data []byte, reply Handler) error
+	HandleClose(code uint16, data []byte) error
 }
 
 //define header
@@ -147,6 +165,7 @@ type dhanler struct {
 
 func (d *dhanler) HandleTextMessage(msg string, reply Handler) error {
 	log.Printf("handle text data %s \n", msg)
+	time.Sleep(time.Duration(2) * time.Second)
 	return reply.Send([]byte("are u ok ?"))
 }
 
@@ -170,7 +189,12 @@ func (d *dhanler) HandlePong(data []byte, reply Handler) error {
 	return reply.Ping([]byte("are u ok?"))
 }
 
-type subConn struct {
+func (d *dhanler) HandleClose(code uint16, data []byte) error {
+	log.Printf("code is %d, reason is %s \n", code, string(data))
+	return nil
+}
+
+type websocket struct {
 	conn       net.Conn
 	handler    MessageHandler
 	frame      *frame
@@ -188,14 +212,14 @@ type Handler interface {
 
 //NewHandler handler sub protocol
 func NewHandler(conn net.Conn, handler MessageHandler, extensions []string) Handler {
-	return &subConn{
+	return &websocket{
 		conn:       conn,
 		handler:    handler,
 		extensions: extensions,
 	}
 }
 
-func (sc *subConn) enableDeflat() bool {
+func (sc *websocket) enableDeflat() bool {
 	for _, e := range sc.extensions {
 		if strings.Contains(e, "permessage-deflate") {
 			return true
@@ -204,19 +228,19 @@ func (sc *subConn) enableDeflat() bool {
 	return false
 }
 
-func (sc *subConn) Ping(data []byte) error {
+func (sc *websocket) Ping(data []byte) error {
 	f := newFrame(0, opp, 0, 0, nil, data)
 	_, err := sc.conn.Write(f.toBytes())
 	return err
 }
 
-func (sc *subConn) Pong(data []byte) error {
+func (sc *websocket) Pong(data []byte) error {
 	f := newFrame(0, opg, 0, 0, nil, data)
 	_, err := sc.conn.Write(f.toBytes())
 	return err
 }
 
-func (sc *subConn) Send(msg []byte) error {
+func (sc *websocket) Send(msg []byte) error {
 	content := msg
 	var err error
 	if sc.enableDeflat() {
@@ -227,20 +251,12 @@ func (sc *subConn) Send(msg []byte) error {
 			return err
 		}
 	}
-	//mask not allowed in server side???
-	// maskkey := alg.RandomMask()
-	// if sc.frame.mask == 0 {
-	// 	maskkey = nil
-	// }
 	f := newFrame(sc.frame.fin, sc.frame.opcode, 0x0, sc.frame.rsv, nil, content)
-	// if f.mask == 1 {
-	// 	translate(f.payload, f.mkey)
-	// }
 	_, err = sc.conn.Write(f.toBytes())
 	return err
 }
 
-func (sc *subConn) createFrame() (*frame, error) {
+func (sc *websocket) createFrame() (*frame, error) {
 	//read maybe all frame
 	var buffer = make([]byte, 1024)
 	n, err := sc.conn.Read(buffer)
@@ -249,8 +265,8 @@ func (sc *subConn) createFrame() (*frame, error) {
 	}
 	f := &frame{}
 	if n < 2 {
-		sc.conn.Write(closeFrame(abnormal).toBytes())
-		return nil, fmt.Errorf("error size")
+		sc.conn.Write(closeFrame(protocolErr, reasons[protocolErr]).toBytes())
+		return nil, fmt.Errorf("error protocol")
 	}
 	setOpcode(buffer[0], f)
 	//mask and len
@@ -258,14 +274,14 @@ func (sc *subConn) createFrame() (*frame, error) {
 	payloadIdx := 2
 	if f.pl == payloadFixLen {
 		if n < 4 {
-			sc.conn.Write(closeFrame(abnormal).toBytes())
+			sc.conn.Write(closeFrame(protocolErr, "invalid extlen exception").toBytes())
 			return nil, fmt.Errorf("error ext len")
 		}
 		f.el, _ = binary.Uvarint(buffer[2:4])
 		payloadIdx = 4
 	} else if f.pl == payloadMaxLen {
 		if n < 8 {
-			sc.conn.Write(closeFrame(abnormal).toBytes())
+			sc.conn.Write(closeFrame(protocolErr, "invalid extlen exception").toBytes())
 			return nil, fmt.Errorf("error ext len")
 		}
 		f.el, _ = binary.Uvarint(buffer[2:10])
@@ -273,7 +289,7 @@ func (sc *subConn) createFrame() (*frame, error) {
 	}
 	if f.mask == 1 {
 		if n < payloadIdx+4 {
-			sc.conn.Write(closeFrame(abnormal).toBytes())
+			sc.conn.Write(closeFrame(abnormal, "invalid mask len exception").toBytes())
 			return nil, fmt.Errorf("invaild mask")
 		}
 		f.mkey = buffer[payloadIdx : payloadIdx+4]
@@ -285,9 +301,9 @@ func (sc *subConn) createFrame() (*frame, error) {
 	if uint64(n) < uint64(payloadIdx)+totalLen {
 		rl := uint64(payloadIdx) + totalLen - uint64(n)
 		var b = make([]byte, rl)
-		n, err = sc.conn.Read(b)
+		n, err = io.ReadAtLeast(sc.conn, b, int(rl))
 		if uint64(n) != rl {
-			sc.conn.Write(closeFrame(outsideErr).toBytes())
+			sc.conn.Write(closeFrame(outsideErr, "the message is to litte?").toBytes())
 			return nil, fmt.Errorf("error data frame")
 		}
 		f.payload = append(f.payload, b...)
@@ -300,26 +316,27 @@ func (sc *subConn) createFrame() (*frame, error) {
 		log.Printf("read data error")
 		return nil, err
 	}
-	translate(f.payload[:totalLen], f.mkey)
-	if sc.enableDeflat() {
-		f.payload, _ = sc.decode(f.payload[:totalLen])
+	if f.mask == 1 {
+		alg.Translate(f.payload, f.mkey)
+	}
+	if sc.enableDeflat() && (f.opcode == opb || f.opcode == opt) {
+		f.payload, _ = sc.decode(f.payload)
 	}
 	if err != nil {
 		log.Printf("decode failed %s \n", err)
-		sc.conn.Write(closeFrame(extensionNotSupport).toBytes())
+		sc.conn.Write(closeFrame(extensionNotSupport, reasons[extensionNotSupport]).toBytes())
 		return nil, err
 	}
 	return f, nil
 }
 
-func (sc *subConn) handleMessage() error {
+func (sc *websocket) handleMessage() error {
 	for {
 		f, err := sc.createFrame()
 		if err != nil {
 			sc.conn.Close()
-			continue
+			return err
 		}
-		log.Printf("the frame is %v \n", f)
 		sc.frame = f
 		switch f.opcode {
 		case opp:
@@ -335,35 +352,32 @@ func (sc *subConn) handleMessage() error {
 			sc.handler.HandleBinMessage(f.payload, sc)
 			break
 		case ops:
+			sc.handler.HandleClose(alg.ByteToUint16(f.payload[:2]), f.payload[2:])
 			sc.close(normlClose)
 			break
 		default:
+			sc.handler.HandleClose(alg.ByteToUint16(f.payload[:2]), f.payload[2:])
 			sc.close(acceptErr)
 			break
 		}
 	}
 }
-func (sc *subConn) decode(payload []byte) ([]byte, error) {
+func (sc *websocket) decode(payload []byte) ([]byte, error) {
 	deflat := alg.Deflat{}
 	return deflat.Decoding(payload)
 }
-func translate(payload, maskKey []byte) {
-	for i := 0; i < len(payload); i++ {
-		payload[i] = payload[i] ^ maskKey[i%4]
-	}
-}
 
-func (sc *subConn) close(closeCode int16) error {
+func (sc *websocket) close(closeCode int16) error {
 	// bigEndian or littleEndian?
-	_, err := sc.conn.Write(closeFrame(closeCode).toBytes())
+	_, err := sc.conn.Write(closeFrame(closeCode, "").toBytes())
 	if err != nil {
 		log.Printf("send close frame error %s \n", err)
 	}
 	return sc.conn.Close()
 }
 
-func closeFrame(code int16) *frame {
-	return newFrame(0x0, ops, 0x0, 0x0, nil, []byte{byte(code >> 0x08), byte(code)})
+func closeFrame(code int16, reason string) *frame {
+	return newFrame(0x0, ops, 0x0, 0x0, nil, append([]byte{byte(code >> 0x08), byte(code)}, []byte(reason)...))
 }
 
 func setMaskAndLen(segment byte, f *frame) {

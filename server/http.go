@@ -21,7 +21,7 @@ const (
 	badRequest     = "HTTP/1.1 400 Bad Request\r\n"
 )
 
-type websocket struct {
+type protocol struct {
 	host string
 	//websocket location
 	url string
@@ -105,11 +105,6 @@ func (hs Header) HTTPVersion() string {
 	return hs.headers["HTTP-Version"][0]
 }
 
-type protocol interface {
-	handshake(headers Header) error
-	upgrade(conn net.Conn, headers Header) error
-}
-
 //Listener ...listener interface
 type Listener interface {
 	Listen() error
@@ -117,13 +112,13 @@ type Listener interface {
 
 //NewWebsocket ... return new websocket
 func NewWebsocket(host, url string) Listener {
-	return &websocket{
+	return &protocol{
 		host: host,
 		url:  url,
 	}
 }
 
-func (w *websocket) Listen() error {
+func (w *protocol) Listen() error {
 	listen, err := net.Listen("tcp", w.host)
 	if err != nil {
 		return err
@@ -138,7 +133,7 @@ func (w *websocket) Listen() error {
 	}
 }
 
-func (w *websocket) handleConn(conn net.Conn) error {
+func (w *protocol) handleConn(conn net.Conn) error {
 	var buf = make([]byte, 7*1024)
 	n, err := conn.Read(buf)
 	if err != nil {
@@ -178,7 +173,7 @@ func (w *websocket) handleConn(conn net.Conn) error {
 	return nil
 }
 
-func (w *websocket) parserHeaders(buf []byte) *Header {
+func (w *protocol) parserHeaders(buf []byte) *Header {
 	content := string(buf)
 	lines := strings.Split(content, "\r\n")
 	if len(lines) < 3 {
@@ -205,7 +200,7 @@ func (w *websocket) parserHeaders(buf []byte) *Header {
 	return header
 }
 
-func (w *websocket) handshake(header *Header) error {
+func (w *protocol) handshake(header *Header) error {
 	if header.Method() != "GET" {
 		//TODO method invalid
 		return fmt.Errorf("error method")
